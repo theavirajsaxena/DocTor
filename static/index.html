@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DocTor — RAG System</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+
+    body{
+      font-family:'Segoe UI',sans-serif;
+      background:#0f1117;color:#e2e8f0;
+      height:100vh;display:flex;flex-direction:column;
+    }
+
+    /* Header */
+    header{
+      background:#1a1d2e;border-bottom:1px solid #2d3148;
+      padding:12px 28px;display:flex;align-items:center;
+      justify-content:space-between;
+    }
+    .header-left{display:flex;align-items:center;gap:12px}
+    header h1{font-size:22px;font-weight:700;color:#7c83ff;letter-spacing:1px}
+    header span{font-size:12px;color:#64748b}
+    .reset-btn{
+      padding:6px 14px;background:transparent;border:1px solid #2d3148;
+      border-radius:6px;color:#64748b;font-size:12px;cursor:pointer;
+      transition:all 0.2s;
+    }
+    .reset-btn:hover{border-color:#f87171;color:#f87171}
+
+    /* Layout */
+    .main{display:flex;flex:1;overflow:hidden}
+
+    /* Left panel */
+    .left-panel{
+      width:300px;background:#1a1d2e;border-right:1px solid #2d3148;
+      display:flex;flex-direction:column;padding:18px;gap:14px;overflow-y:auto;
+    }
+    .panel-title{
+      font-size:11px;font-weight:600;color:#7c83ff;
+      text-transform:uppercase;letter-spacing:1px;
+    }
+
+    /* Upload */
+    .upload-area{
+      border:2px dashed #2d3148;border-radius:10px;
+      padding:20px 12px;text-align:center;cursor:pointer;transition:all 0.2s;
+    }
+    .upload-area:hover,.upload-area.dragover{border-color:#7c83ff;background:#1e2235}
+    .upload-icon{font-size:28px;margin-bottom:6px}
+    .upload-area p{font-size:12px;color:#64748b}
+    .upload-area input{display:none}
+
+    /* Buttons */
+    .btn{
+      padding:10px 16px;border-radius:8px;border:none;
+      font-size:13px;font-weight:600;cursor:pointer;
+      transition:all 0.2s;width:100%;
+    }
+    .btn-primary{background:#7c83ff;color:white}
+    .btn-primary:hover{background:#6366f1}
+    .btn-primary:disabled{background:#2d3148;color:#475569;cursor:not-allowed}
+
+    /* Steps */
+    .status-steps{display:flex;flex-direction:column;gap:6px}
+    .step{
+      display:flex;align-items:center;gap:10px;
+      padding:9px 12px;border-radius:8px;background:#0f1117;font-size:12px;
+    }
+    .step-icon{
+      width:20px;height:20px;border-radius:50%;
+      display:flex;align-items:center;justify-content:center;
+      font-size:10px;flex-shrink:0;font-weight:700;
+    }
+    .step.pending .step-icon{background:#1e2235;color:#475569}
+    .step.loading .step-icon{background:#854d0e;color:#fbbf24;animation:pulse 1s infinite}
+    .step.done    .step-icon{background:#14532d;color:#4ade80}
+    .step.error   .step-icon{background:#7f1d1d;color:#f87171}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+
+    .step-detail{font-size:10px;color:#475569;margin-left:auto}
+
+    /* Doc info */
+    .doc-info{
+      background:#0f1117;border-radius:8px;padding:12px;
+      font-size:11px;color:#64748b;display:none;
+      border:1px solid #2d3148;
+    }
+    .doc-info.visible{display:block}
+    .doc-info .doc-name{
+      font-weight:600;color:#e2e8f0;margin-bottom:6px;
+      font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    }
+    .doc-badges{display:flex;gap:6px;flex-wrap:wrap}
+    .badge{
+      background:#1e2235;border:1px solid #2d3148;
+      border-radius:4px;padding:2px 8px;font-size:10px;color:#94a3b8;
+    }
+
+    /* Right panel */
+    .right-panel{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+    /* Chat */
+    .chat-messages{
+      flex:1;overflow-y:auto;padding:20px 28px;
+      display:flex;flex-direction:column;gap:18px;
+    }
+
+    .welcome{text-align:center;margin:auto;color:#475569;max-width:400px}
+    .welcome h2{font-size:32px;color:#7c83ff;margin-bottom:8px}
+    .welcome p{font-size:13px;line-height:1.6}
+
+    /* Messages */
+    .message{display:flex;flex-direction:column;gap:8px;max-width:860px}
+    .message.user{align-self:flex-end;align-items:flex-end}
+    .message.bot {align-self:flex-start}
+
+    .msg-meta{font-size:10px;color:#475569;padding:0 4px}
+
+    .bubble{
+      padding:12px 16px;border-radius:12px;
+      font-size:13.5px;line-height:1.7;
+    }
+    .message.user .bubble{
+      background:#7c83ff;color:white;border-bottom-right-radius:4px;
+    }
+    .message.bot .bubble{
+      background:#1a1d2e;color:#e2e8f0;border-bottom-left-radius:4px;
+      border:1px solid #2d3148;
+    }
+
+    /* Citations */
+    .citations-panel{display:flex;flex-direction:column;gap:6px;max-width:700px}
+    .citation-label{
+      font-size:10px;color:#7c83ff;font-weight:600;
+      text-transform:uppercase;letter-spacing:0.5px;padding:0 2px;
+    }
+    .citation-card{
+      background:#0f1117;border:1px solid #2d3148;
+      border-left:3px solid #7c83ff;border-radius:6px;
+      padding:10px 12px;font-size:11.5px;color:#94a3b8;cursor:pointer;
+      transition:all 0.2s;
+    }
+    .citation-card:hover{background:#1a1d2e;border-left-color:#a5b4fc}
+    .citation-card .cite-header{
+      font-weight:600;color:#7c83ff;margin-bottom:4px;
+      display:flex;align-items:center;justify-content:space-between;
+    }
+    .cite-page{
+      background:#1e2235;border-radius:4px;
+      padding:1px 6px;font-size:10px;color:#94a3b8;
+    }
+    .cite-text{line-height:1.5}
+    .cite-expanded{display:none;margin-top:8px;padding-top:8px;border-top:1px solid #2d3148;color:#64748b;font-size:11px}
+    .citation-card.expanded .cite-expanded{display:block}
+
+    /* No citations note */
+    .no-citation-note{
+      font-size:11px;color:#475569;font-style:italic;padding:4px 2px;
+    }
+
+    /* Thinking */
+    .thinking{
+      display:flex;gap:5px;padding:12px 16px;
+      background:#1a1d2e;border-radius:12px;
+      border:1px solid #2d3148;width:fit-content;
+    }
+    .dot{
+      width:6px;height:6px;background:#7c83ff;
+      border-radius:50%;animation:bounce 1.2s infinite;
+    }
+    .dot:nth-child(2){animation-delay:0.2s}
+    .dot:nth-child(3){animation-delay:0.4s}
+    @keyframes bounce{
+      0%,80%,100%{transform:translateY(0)}
+      40%{transform:translateY(-6px)}
+    }
+
+    /* Input area */
+    .chat-input-area{
+      padding:14px 28px;background:#1a1d2e;
+      border-top:1px solid #2d3148;display:flex;gap:10px;align-items:flex-end;
+    }
+    .input-wrapper{flex:1;position:relative}
+    .chat-input-area textarea{
+      width:100%;background:#0f1117;border:1px solid #2d3148;
+      border-radius:10px;padding:11px 14px;color:#e2e8f0;
+      font-size:13.5px;font-family:inherit;resize:none;
+      outline:none;max-height:120px;line-height:1.5;
+    }
+    .chat-input-area textarea:focus{border-color:#7c83ff}
+    .chat-input-area textarea::placeholder{color:#475569}
+    .char-count{
+      position:absolute;bottom:8px;right:12px;
+      font-size:10px;color:#475569;
+    }
+
+    .send-btn{
+      width:42px;height:42px;background:#7c83ff;border:none;
+      border-radius:10px;cursor:pointer;font-size:16px;
+      color:white;transition:background 0.2s;flex-shrink:0;
+    }
+    .send-btn:hover{background:#6366f1}
+    .send-btn:disabled{background:#2d3148;cursor:not-allowed}
+
+    /* Scrollbar */
+    ::-webkit-scrollbar{width:5px}
+    ::-webkit-scrollbar-track{background:transparent}
+    ::-webkit-scrollbar-thumb{background:#2d3148;border-radius:3px}
+
+    /* Toast */
+    .toast{
+      position:fixed;bottom:24px;right:24px;
+      background:#1a1d2e;border:1px solid #2d3148;
+      border-radius:8px;padding:10px 16px;font-size:12px;
+      color:#e2e8f0;z-index:999;opacity:0;
+      transition:opacity 0.3s;pointer-events:none;
+    }
+    .toast.show{opacity:1}
+    .toast.success{border-left:3px solid #4ade80}
+    .toast.error  {border-left:3px solid #f87171}
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <h1>DocTor</h1>
+    <span>Adaptive RAG • Hybrid Retrieval • Evidence-Aligned Answers</span>
+  </div>
+  <button class="reset-btn" id="resetBtn">↺ New Session</button>
+</header>
+
+<div class="main">
+
+  <!-- Left Panel -->
+  <div class="left-panel">
+    <div class="panel-title">Document</div>
+
+    <div class="upload-area" id="uploadArea">
+      <div class="upload-icon">📄</div>
+      <p id="uploadText">Click or drag & drop a PDF</p>
+      <input type="file" id="fileInput" accept=".pdf"/>
+    </div>
+
+    <button class="btn btn-primary" id="processBtn" disabled>
+      ⚡ Process Document
+    </button>
+
+    <div class="panel-title">Pipeline Status</div>
+    <div class="status-steps">
+      <div class="step pending" id="step-upload">
+        <div class="step-icon">1</div>
+        <span>Upload & Extract</span>
+        <span class="step-detail" id="detail-upload"></span>
+      </div>
+      <div class="step pending" id="step-chunk">
+        <div class="step-icon">2</div>
+        <span>Adaptive Chunking</span>
+        <span class="step-detail" id="detail-chunk"></span>
+      </div>
+      <div class="step pending" id="step-index">
+        <div class="step-icon">3</div>
+        <span>Hybrid Indexing</span>
+        <span class="step-detail" id="detail-index"></span>
+      </div>
+    </div>
+
+    <div class="doc-info" id="docInfo">
+      <div class="doc-name" id="docName">—</div>
+      <div class="doc-badges" id="docBadges"></div>
+    </div>
+
+    <div class="panel-title" id="historyTitle" style="display:none">
+      Session
+    </div>
+    <div id="historyCount"
+      style="font-size:11px;color:#64748b;display:none">
+    </div>
+  </div>
+
+  <!-- Right Panel -->
+  <div class="right-panel">
+    <div class="chat-messages" id="chatMessages">
+      <div class="welcome" id="welcome">
+        <h2>DocTor</h2>
+        <p>Upload a technical document and ask questions.<br/>
+        Answers are grounded in your document with citations.</p>
+      </div>
+    </div>
+
+    <div class="chat-input-area">
+      <div class="input-wrapper">
+        <textarea
+          id="queryInput"
+          placeholder="Ask a question about your document… (Enter to send)"
+          rows="1" disabled
+        ></textarea>
+        <span class="char-count" id="charCount">0</span>
+      </div>
+      <button class="send-btn" id="sendBtn" disabled>➤</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const API = 'http://127.0.0.1:8000';
+
+  const uploadArea  = document.getElementById('uploadArea');
+  const fileInput   = document.getElementById('fileInput');
+  const processBtn  = document.getElementById('processBtn');
+  const queryInput  = document.getElementById('queryInput');
+  const sendBtn     = document.getElementById('sendBtn');
+  const chatMessages= document.getElementById('chatMessages');
+  const welcome     = document.getElementById('welcome');
+  const resetBtn    = document.getElementById('resetBtn');
+  const docInfo     = document.getElementById('docInfo');
+  const docName     = document.getElementById('docName');
+  const docBadges   = document.getElementById('docBadges');
+
+  let selectedFile = null;
+  let docReady     = false;
+  let questionCount= 0;
+
+  // ── File selection ──────────────────────────────────────────────
+  uploadArea.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => {
+    if (e.target.files[0]) selectFile(e.target.files[0]);
+  });
+  uploadArea.addEventListener('dragover', e => {
+    e.preventDefault(); uploadArea.classList.add('dragover');
+  });
+  uploadArea.addEventListener('dragleave', () =>
+    uploadArea.classList.remove('dragover'));
+  uploadArea.addEventListener('drop', e => {
+    e.preventDefault(); uploadArea.classList.remove('dragover');
+    if (e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]);
+  });
+
+  function selectFile(file) {
+    if (!file.name.endsWith('.pdf')) {
+      showToast('Please select a PDF file.', 'error'); return;
+    }
+    selectedFile = file;
+    document.getElementById('uploadText').textContent = `📎 ${file.name}`;
+    processBtn.disabled = false;
+  }
+
+  // ── Process pipeline ────────────────────────────────────────────
+  processBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+    processBtn.disabled = true;
+    resetSteps();
+
+    try {
+      // 1. Upload & extract
+      setStep('upload', 'loading');
+      const fd = new FormData();
+      fd.append('file', selectedFile);
+      const upRes  = await fetch(`${API}/upload`, { method:'POST', body:fd });
+      if (!upRes.ok) throw new Error('Upload');
+      const upData = await upRes.json();
+      setStep('upload', 'done', `${upData.total_pages} pages`);
+
+      // 2. Chunk
+      setStep('chunk', 'loading');
+      const chRes  = await fetch(`${API}/chunk`, { method:'POST' });
+      if (!chRes.ok) throw new Error('Chunk');
+      const chData = await chRes.json();
+      setStep('chunk', 'done', `${chData.total_chunks} chunks`);
+
+      // 3. Index
+      setStep('index', 'loading');
+      const ixRes  = await fetch(`${API}/index`, { method:'POST' });
+      if (!ixRes.ok) throw new Error('Index');
+      setStep('index', 'done', 'FAISS+BM25');
+
+      // Show doc info
+      docName.textContent = upData.filename;
+      docBadges.innerHTML =
+        `<span class="badge">${upData.total_pages} pages</span>
+         <span class="badge">${chData.total_chunks} chunks</span>
+         <span class="badge">avg ${chData.avg_chunk_words}w/chunk</span>`;
+      docInfo.classList.add('visible');
+      document.getElementById('historyTitle').style.display = 'block';
+
+      docReady = true;
+      queryInput.disabled = false;
+      sendBtn.disabled = false;
+      queryInput.focus();
+
+      welcome.innerHTML =
+        `<h2>Ready ✓</h2>
+         <p>Ask anything about <strong>${upData.filename}</strong><br/>
+         <span style="font-size:11px;color:#475569">
+           ${upData.total_pages} pages • ${chData.total_chunks} chunks indexed
+         </span></p>`;
+
+      showToast('Document processed successfully!', 'success');
+
+    } catch(err) {
+      const stage =
+        err.message === 'Upload' ? 'upload' :
+        err.message === 'Chunk'  ? 'chunk'  : 'index';
+      setStep(stage, 'error');
+      showToast(`Failed at: ${err.message} stage`, 'error');
+      processBtn.disabled = false;
+    }
+  });
+
+  // ── Step helpers ────────────────────────────────────────────────
+  function setStep(name, state, detail='') {
+    const el   = document.getElementById(`step-${name}`);
+    const icon = el.querySelector('.step-icon');
+    const det  = document.getElementById(`detail-${name}`);
+    el.className = `step ${state}`;
+    icon.textContent =
+      state==='done'    ? '✓' :
+      state==='loading' ? '…' :
+      state==='error'   ? '✗' :
+      icon.textContent;
+    if (det) det.textContent = detail;
+  }
+
+  function resetSteps() {
+    ['upload','chunk','index'].forEach((s,i) => {
+      const el = document.getElementById(`step-${s}`);
+      el.className = 'step pending';
+      el.querySelector('.step-icon').textContent = i+1;
+      const det = document.getElementById(`detail-${s}`);
+      if (det) det.textContent = '';
+    });
+  }
+
+  // ── Reset session ───────────────────────────────────────────────
+  resetBtn.addEventListener('click', async () => {
+    if (!confirm('Start a new session? Current document will be cleared.')) return;
+    await fetch(`${API}/reset`, { method:'POST' });
+    selectedFile  = null;
+    docReady      = false;
+    questionCount = 0;
+    document.getElementById('uploadText').textContent = 'Click or drag & drop a PDF';
+    processBtn.disabled = true;
+    queryInput.disabled = true;
+    sendBtn.disabled = true;
+    docInfo.classList.remove('visible');
+    document.getElementById('historyTitle').style.display = 'none';
+    document.getElementById('historyCount').style.display = 'none';
+    resetSteps();
+    chatMessages.innerHTML = '';
+    welcome.style.display  = 'block';
+    welcome.innerHTML =
+      `<h2>DocTor</h2>
+       <p>Upload a technical document and ask questions.<br/>
+       Answers are grounded in your document with citations.</p>`;
+    fileInput.value = '';
+    showToast('Session reset.', 'success');
+  });
+
+  // ── Send message ────────────────────────────────────────────────
+  sendBtn.addEventListener('click', sendMessage);
+  queryInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault(); sendMessage();
+    }
+  });
+
+  queryInput.addEventListener('input', () => {
+    queryInput.style.height = 'auto';
+    queryInput.style.height = queryInput.scrollHeight + 'px';
+    document.getElementById('charCount').textContent =
+      queryInput.value.length;
+  });
+
+  async function sendMessage() {
+    const query = queryInput.value.trim();
+    if (!query || !docReady) return;
+
+    queryInput.value = '';
+    queryInput.style.height = 'auto';
+    document.getElementById('charCount').textContent = '0';
+    sendBtn.disabled = true;
+    queryInput.disabled = true;
+    welcome.style.display = 'none';
+    questionCount++;
+
+    appendUserMessage(query);
+    const thinkId = appendThinking();
+
+    try {
+      const res = await fetch(
+        `${API}/ask?query=${encodeURIComponent(query)}&top_k=5`,
+        { method:'POST' }
+      );
+      if (!res.ok) throw new Error(`Server error ${res.status}`);
+      const data = await res.json();
+      removeThinking(thinkId);
+      appendBotMessage(data.answer, data.citations, data.chunks_used);
+
+      // Update session counter
+      const hc = document.getElementById('historyCount');
+      hc.style.display = 'block';
+      hc.textContent   = `${questionCount} question${questionCount>1?'s':''} asked`;
+
+    } catch(err) {
+      removeThinking(thinkId);
+      appendBotMessage(`Sorry, an error occurred: ${err.message}`, [], 0);
+      showToast(err.message, 'error');
+    }
+
+    sendBtn.disabled = false;
+    queryInput.disabled = false;
+    queryInput.focus();
+  }
+
+  // ── Message builders ─────────────────────────────────────────────
+  function appendUserMessage(text) {
+    const div = document.createElement('div');
+    div.className = 'message user';
+    div.innerHTML = `
+      <div class="msg-meta">You</div>
+      <div class="bubble">${escapeHtml(text)}</div>`;
+    chatMessages.appendChild(div);
+    scrollChat();
+  }
+
+  function appendBotMessage(answer, citations, chunksUsed) {
+    const div = document.createElement('div');
+    div.className = 'message bot';
+
+    let citHtml = '';
+    if (citations && citations.length > 0) {
+      citHtml = `
+        <div class="citations-panel">
+          <div class="citation-label">📌 ${citations.length} Source${citations.length>1?'s':''} Used</div>
+          ${citations.map(c => `
+            <div class="citation-card" onclick="this.classList.toggle('expanded')">
+              <div class="cite-header">
+                <span>[${c.citation_number}] ${escapeHtml(c.full_text.substring(0,40))}…</span>
+                <span class="cite-page">Page ${c.page}</span>
+              </div>
+              <div class="cite-text">${escapeHtml(c.preview)}</div>
+              <div class="cite-expanded">${escapeHtml(c.full_text)}</div>
+            </div>`).join('')}
+        </div>`;
+    } else {
+      citHtml = `<div class="no-citation-note">
+        ℹ️ No inline citations detected in this response.
+      </div>`;
+    }
+
+    const meta = chunksUsed > 0
+      ? `DocTor • ${chunksUsed} chunks retrieved`
+      : 'DocTor';
+
+    div.innerHTML = `
+      <div class="msg-meta">${meta}</div>
+      <div class="bubble">${escapeHtml(answer)}</div>
+      ${citHtml}`;
+    chatMessages.appendChild(div);
+    scrollChat();
+  }
+
+  function appendThinking() {
+    const id  = 'think-' + Date.now();
+    const div = document.createElement('div');
+    div.className = 'message bot';
+    div.id = id;
+    div.innerHTML = `
+      <div class="msg-meta">DocTor is thinking…</div>
+      <div class="thinking">
+        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+      </div>`;
+    chatMessages.appendChild(div);
+    scrollChat();
+    return id;
+  }
+
+  function removeThinking(id) {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  }
+
+  // ── Utilities ────────────────────────────────────────────────────
+  function scrollChat() {
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function escapeHtml(t) {
+    if (!t) return '';
+    return String(t)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/\n/g,'<br>');
+  }
+
+  function showToast(msg, type='success') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className   = `toast ${type} show`;
+    setTimeout(() => t.classList.remove('show'), 3000);
+  }
+</script>
+</body>
+</html>
