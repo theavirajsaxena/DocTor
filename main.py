@@ -37,6 +37,12 @@ app.add_middleware(
 # Serve the frontend HTML from the /static folder
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+from fastapi.responses import RedirectResponse
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/static/index.html")
+
 # In-memory store for the current document session
 # (In a real app you'd use a database, but this is fine for your project)
 document_store = {
@@ -51,9 +57,6 @@ document_store = {
 
 UPLOAD_DIR = "uploads"
 
-@app.get("/")
-def root():
-    return {"message": "DocTor RAG API is running"}
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
