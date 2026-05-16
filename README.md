@@ -1,47 +1,86 @@
-# DocTor — Web-Scale RAG System
+# DocTor - Web-Scale RAG System
 
 A web-based Retrieval-Augmented Generation (RAG) system for technical document understanding.
 
 ## Features
 - Adaptive semantic chunking
-- Dense-Sparse hybrid indexing (FAISS + BM25)
-- Reciprocal Rank Fusion (RRF) retrieval
+- Dense-sparse hybrid indexing with FAISS and BM25
+- Reciprocal Rank Fusion retrieval
 - Evidence-aligned answer generation with inline citations
 - Clean chat UI with expandable citation cards
-- Response caching for repeated queries
+- Per-browser sessions and response caching
+- Upload/query limits for safer deployment
 
 ## Tech Stack
-- **Backend:** Python, FastAPI, Uvicorn
-- **NLP:** spaCy, sentence-transformers (all-MiniLM-L6-v2)
-- **Retrieval:** FAISS (dense) + BM25 (sparse) + RRF fusion
-- **LLM:** GLM-4.5-Air via OpenRouter
-- **Frontend:** HTML, CSS, Vanilla JavaScript
+- Backend: Python, FastAPI, Uvicorn
+- NLP: spaCy, sentence-transformers (all-MiniLM-L6-v2)
+- Retrieval: FAISS + BM25 + RRF fusion
+- LLM: GLM-4.5-Air via OpenRouter by default
+- Frontend: HTML, CSS, Vanilla JavaScript
 
-## Setup
+## Local Setup
 
-### 1. Clone the repository
-\git clone https://github.com/YOUR_USERNAME/doctor-rag.git
-cd doctor-rag
-\
-### 2. Create virtual environment
-\py -3.11 -m venv venv
-venv\Scripts\activate
-\
-### 3. Install dependencies
-\pip install -r requirements.txt
-python -m spacy download en_core_web_sm
-\
-### 4. Set up environment variables
-Create a \.env\ file in the root directory:
-\OPENROUTER_API_KEY=your_openrouter_key_here
-\
-### 5. Run the server
-\uvicorn main:app --reload
-\
-### 6. Open the UI
-\http://127.0.0.1:8000/static/index.html
-\
+```powershell
+py -3.11 -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Create a `.env` file:
+
+```env
+OPENROUTER_API_KEY=your_openrouter_key_here
+CORS_ORIGINS=http://127.0.0.1:8000,http://localhost:8000
+```
+
+Preload local models, then run the API:
+
+```powershell
+python scripts/preload_models.py
+uvicorn main:app --reload
+```
+
+Open `http://127.0.0.1:8000/static/index.html`.
+
+## Deployment
+
+Required environment variables:
+
+```env
+OPENROUTER_API_KEY=your_openrouter_key_here
+CORS_ORIGINS=https://your-deployed-domain.com
+```
+
+Optional environment variables:
+
+```env
+OPENROUTER_MODEL=z-ai/glm-4.5-air:free
+MAX_UPLOAD_MB=25
+MAX_PDF_PAGES=200
+MAX_QUERY_CHARS=1000
+MAX_TOP_K=10
+MAX_SESSIONS=100
+SESSION_TTL_MINUTES=120
+MODEL_CACHE_DIR=model_cache
+```
+
+Recommended build command:
+
+```powershell
+pip install -r requirements.txt
+python scripts/preload_models.py
+```
+
+Recommended start command:
+
+```powershell
+python -m uvicorn main:app --host 0.0.0.0 --port $env:PORT
+```
+
+For Linux-based hosts, use `$PORT` instead of `$env:PORT`.
+
 ## API Endpoints
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | /upload | Upload a PDF document |
@@ -56,18 +95,32 @@ Create a \.env\ file in the root directory:
 | POST | /reset | Reset the current session |
 
 ## Project Structure
-\doctor-rag/
-├── main.py          # FastAPI app and all endpoints
-├── extractor.py     # PDF text extraction
-├── chunker.py       # Adaptive semantic chunking
-├── indexer.py       # FAISS + BM25 hybrid indexing
-├── retriever.py     # RRF retrieval with re-ranking
-├── generator.py     # LLM answer generation
-├── test_doctor.py   # Automated test suite
-├── static/
-│   └── index.html   # Frontend chat UI
-├── uploads/         # Uploaded PDFs (gitignored)
-└── requirements.txt
-\
-## B.Tech Major Project
-Department of Computer Science & Engineering
+
+```text
+doctor-rag/
+|-- main.py
+|-- extractor.py
+|-- chunker.py
+|-- indexer.py
+|-- retriever.py
+|-- generator.py
+|-- test_doctor.py
+|-- scripts/
+|   `-- preload_models.py
+|-- static/
+|   `-- index.html
+|-- uploads/
+|-- requirements.txt
+|-- Procfile
+`-- runtime.txt
+```
+
+## Testing
+
+Start the server first, then run:
+
+```powershell
+python test_doctor.py
+```
+
+The script expects a live server at `127.0.0.1:8000` and at least one sample PDF in `uploads/`.

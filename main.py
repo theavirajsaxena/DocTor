@@ -1,101 +1,266 @@
-# main.py
+import hashlib
 import os
-import shutil
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+import re
+import uuid
+from datetime import datetime, timedelta
+
 from dotenv import load_dotenv
-from extractor import extract_text_from_pdf
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
 from chunker import adaptive_chunk
+from extractor import extract_text_from_pdf
+from generator import generate_answer
 from indexer import build_index
 from retriever import retrieve
-from generator import generate_answer
-import hashlib
 
-def _cache_key(query: str) -> str:
-    """Creates a short hash key for a query string."""
-    return hashlib.md5(query.strip().lower().encode()).hexdigest()
 
-load_dotenv()  # loads your GEMINI_API_KEY from .env
+load_dotenv()
+
+UPLOAD_DIR = "uploads"
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "25"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
+MAX_QUERY_CHARS = int(os.getenv("MAX_QUERY_CHARS", "1000"))
+MAX_TOP_K = int(os.getenv("MAX_TOP_K", "10"))
+MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "100"))
+SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "120"))
+SESSION_COOKIE_NAME = "doctor_session"
+DEFAULT_SESSION_ID = "default"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI(title="DocTor RAG System")
-from fastapi.middleware.cors import CORSMiddleware
 
+
+def _parse_cors_origins() -> list[str]:
+    origins = os.getenv("CORS_ORIGINS", "")
+    if not origins:
+        return ["http://127.0.0.1:8000", "http://localhost:8000"]
+    return [origin.strip() for origin in origins.split(",") if origin.strip()]
+
+
+cors_origins = _parse_cors_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cors_origins,
+    allow_credentials="*" not in cors_origins,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Session-Id"],
 )
 
-# ### 7.3 — Open the UI
-
-# Make sure your server is running, then open your browser and go to:
-# ```
-# http://127.0.0.1:8000/static/index.html
-
-# Serve the frontend HTML from the /static folder
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-from fastapi.responses import RedirectResponse
+
+def _new_document_store() -> dict:
+    return {
+        "filename": None,
+        "stored_path": None,
+        "pages": [],
+        "chunks": [],
+        "index": None,
+        "last_answer": {},
+        "history": [],
+        "cache": {},
+        "last_seen": datetime.utcnow(),
+    }
+
+
+document_sessions: dict[str, dict] = {DEFAULT_SESSION_ID: _new_document_store()}
+
+
+def _cache_key(query: str) -> str:
+    """Creates a stable hash key for a normalized query string."""
+    return hashlib.sha256(query.strip().lower().encode()).hexdigest()
+
+
+def _session_id_from_request(request: Request) -> str | None:
+    session_id = request.headers.get("x-session-id") or request.cookies.get(SESSION_COOKIE_NAME)
+    if not session_id:
+        return None
+    return re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:80] or None
+
+
+def _get_document_store(request: Request, response: Response | None = None) -> dict:
+    _cleanup_expired_sessions()
+
+    session_id = _session_id_from_request(request)
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        if response is not None:
+            response.set_cookie(
+                SESSION_COOKIE_NAME,
+                session_id,
+                httponly=True,
+                samesite="lax",
+                max_age=SESSION_TTL_MINUTES * 60,
+            )
+
+    if session_id not in document_sessions:
+        _trim_session_count()
+        document_sessions[session_id] = _new_document_store()
+    document_sessions[session_id]["last_seen"] = datetime.utcnow()
+    return document_sessions[session_id]
+
+
+def _delete_session_file(document_store: dict) -> None:
+    stored_path = document_store.get("stored_path")
+    if stored_path and os.path.exists(stored_path):
+        os.remove(stored_path)
+
+
+def _cleanup_expired_sessions() -> None:
+    cutoff = datetime.utcnow() - timedelta(minutes=SESSION_TTL_MINUTES)
+    expired = [
+        session_id
+        for session_id, store in document_sessions.items()
+        if session_id != DEFAULT_SESSION_ID and store.get("last_seen", datetime.utcnow()) < cutoff
+    ]
+    for session_id in expired:
+        _delete_session_file(document_sessions[session_id])
+        del document_sessions[session_id]
+
+
+def _trim_session_count() -> None:
+    if len(document_sessions) < MAX_SESSIONS:
+        return
+
+    candidates = [
+        (session_id, store.get("last_seen", datetime.utcnow()))
+        for session_id, store in document_sessions.items()
+        if session_id != DEFAULT_SESSION_ID
+    ]
+    candidates.sort(key=lambda item: item[1])
+
+    while len(document_sessions) >= MAX_SESSIONS and candidates:
+        session_id, _ = candidates.pop(0)
+        _delete_session_file(document_sessions[session_id])
+        del document_sessions[session_id]
+
+
+def _validate_pdf_name(filename: str | None) -> str:
+    if not filename:
+        raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
+    safe_name = os.path.basename(filename)
+    if not safe_name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    return safe_name
+
+
+async def _save_limited_upload(file: UploadFile, safe_name: str) -> str:
+    stored_name = f"{uuid.uuid4().hex}.pdf"
+    file_path = os.path.join(UPLOAD_DIR, stored_name)
+    bytes_written = 0
+
+    try:
+        with open(file_path, "wb") as buffer:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"PDF is too large. Maximum size is {MAX_UPLOAD_MB} MB.",
+                    )
+                buffer.write(chunk)
+
+        with open(file_path, "rb") as buffer:
+            if buffer.read(5) != b"%PDF-":
+                raise HTTPException(status_code=400, detail="Uploaded file is not a valid PDF.")
+    except Exception:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise
+    finally:
+        await file.close()
+
+    return file_path
+
+
+def _validated_top_k(top_k: int) -> int:
+    if top_k < 1 or top_k > MAX_TOP_K:
+        raise HTTPException(status_code=400, detail=f"top_k must be between 1 and {MAX_TOP_K}.")
+    return top_k
+
+
+def _validated_query(query: str) -> str:
+    normalized = query.strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    if len(normalized) > MAX_QUERY_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query is too long. Maximum length is {MAX_QUERY_CHARS} characters.",
+        )
+    return normalized
+
 
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
 
-# In-memory store for the current document session
-# (In a real app you'd use a database, but this is fine for your project)
-document_store = {
-    "filename": None,
-    "pages": [],       # raw extracted pages
-    "chunks": [],      # will be filled in Step 3
-    "index": None,      # will be filled in Step 4
-    "last_answer": {},
-    "history"    : [],
-    "cache"      : {}
-}
-
-UPLOAD_DIR = "uploads"
-
 
 @app.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
-    """
-    Accepts a PDF upload, saves it, extracts text from it.
-    """
-    # Validate file type
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+async def upload_document(
+    request: Request,
+    response: Response,
+    file: UploadFile = File(...),
+):
+    """Accepts a PDF upload, saves it safely, and extracts text from it."""
+    safe_name = _validate_pdf_name(file.filename)
+    file_path = await _save_limited_upload(file, safe_name)
 
-    # Save the uploaded file to disk
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    # Extract text page by page
-    pages = extract_text_from_pdf(file_path)
+    try:
+        pages = extract_text_from_pdf(file_path)
+    except Exception as exc:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=400, detail=f"Could not read PDF: {exc}") from exc
 
     if not pages:
+        if os.path.exists(file_path):
+            os.remove(file_path)
         raise HTTPException(status_code=400, detail="Could not extract text. Is the PDF scanned/image-based?")
+    if len(pages) > MAX_PDF_PAGES:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF has too many text pages. Maximum is {MAX_PDF_PAGES}.",
+        )
 
-    # Store in session
-    document_store["filename"] = file.filename
-    document_store["pages"] = pages
-    document_store["chunks"] = []
-    document_store["index"] = None
+    document_store = _get_document_store(request, response)
+    previous_path = document_store.get("stored_path")
+    if previous_path and os.path.exists(previous_path) and previous_path != file_path:
+        os.remove(previous_path)
 
-    return JSONResponse({
-        "message": "Document uploaded and text extracted successfully.",
-        "filename": file.filename,
-        "total_pages": len(pages),
-        "preview": pages[0]["text"][:300] + "..."  # first 300 chars as preview
+    document_store.update({
+        "filename": safe_name,
+        "stored_path": file_path,
+        "pages": pages,
+        "chunks": [],
+        "index": None,
+        "last_answer": {},
+        "history": [],
+        "cache": {},
     })
 
+    return {
+        "message": "Document uploaded and text extracted successfully.",
+        "filename": safe_name,
+        "total_pages": len(pages),
+        "preview": pages[0]["text"][:300] + "...",
+    }
+
+
 @app.get("/document/info")
-def document_info():
-    """
-    Returns info about the currently loaded document.
-    """
+def document_info(request: Request, response: Response):
+    """Returns info about the currently loaded document."""
+    document_store = _get_document_store(request, response)
     if not document_store["filename"]:
         raise HTTPException(status_code=404, detail="No document uploaded yet.")
 
@@ -103,170 +268,170 @@ def document_info():
         "filename": document_store["filename"],
         "total_pages": len(document_store["pages"]),
         "total_chunks": len(document_store["chunks"]),
-        "index_ready": document_store["index"] is not None
+        "index_ready": document_store["index"] is not None,
     }
 
+
 @app.post("/chunk")
-def chunk_document():
-    """
-    Chunks the currently loaded document using adaptive chunking.
-    Must call /upload first.
-    """
+def chunk_document(request: Request, response: Response):
+    """Chunks the currently loaded document using adaptive chunking."""
+    document_store = _get_document_store(request, response)
     if not document_store["pages"]:
         raise HTTPException(status_code=400, detail="No document loaded. Please upload a PDF first.")
 
     chunks = adaptive_chunk(document_store["pages"])
     document_store["chunks"] = chunks
+    document_store["index"] = None
+    document_store["cache"] = {}
 
-    # Build a small readable summary for the response
     word_counts = [c["word_count"] for c in chunks]
-    avg_words   = sum(word_counts) // len(word_counts) if word_counts else 0
+    avg_words = sum(word_counts) // len(word_counts) if word_counts else 0
 
     return {
-        "message"       : "Document chunked successfully.",
-        "total_chunks"  : len(chunks),
+        "message": "Document chunked successfully.",
+        "total_chunks": len(chunks),
         "avg_chunk_words": avg_words,
         "min_chunk_words": min(word_counts) if word_counts else 0,
         "max_chunk_words": max(word_counts) if word_counts else 0,
-        "sample_chunk"  : chunks[0] if chunks else None
+        "sample_chunk": chunks[0] if chunks else None,
     }
+
+
 @app.post("/index")
-def index_document():
-    """
-    Builds FAISS + BM25 index from the chunked document.
-    Must call /chunk first.
-    """
+def index_document(request: Request, response: Response):
+    """Builds FAISS + BM25 index from the chunked document."""
+    document_store = _get_document_store(request, response)
     if not document_store["chunks"]:
-        raise HTTPException(
-            status_code=400,
-            detail="No chunks found. Please run /chunk first."
-        )
+        raise HTTPException(status_code=400, detail="No chunks found. Please run /chunk first.")
 
     index_data = build_index(document_store["chunks"])
     document_store["index"] = index_data
 
     return {
-        "message"      : "Hybrid index built successfully.",
+        "message": "Hybrid index built successfully.",
         "total_vectors": len(document_store["chunks"]),
-        "index_type"   : "FAISS (dense) + BM25 (sparse) with RRF fusion"
+        "index_type": "FAISS (dense) + BM25 (sparse) with RRF fusion",
     }
 
 
 @app.post("/retrieve")
-def retrieve_chunks(query: str, top_k: int = 5):
-    """
-    Retrieves the most relevant chunks for a given query.
-    Must call /index first.
-    """
+def retrieve_chunks(
+    request: Request,
+    response: Response,
+    query: str = Query(...),
+    top_k: int = Query(5),
+):
+    """Retrieves the most relevant chunks for a given query."""
+    document_store = _get_document_store(request, response)
+    query = _validated_query(query)
+    top_k = _validated_top_k(top_k)
+
     if document_store["index"] is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Index not built yet. Please run /index first."
-        )
+        raise HTTPException(status_code=400, detail="Index not built yet. Please run /index first.")
 
     results = retrieve(query, document_store["index"], top_k)
 
     return {
-        "query"          : query,
-        "top_k"          : top_k,
-        "retrieved_chunks": results
+        "query": query,
+        "top_k": top_k,
+        "retrieved_chunks": results,
     }
-@app.post("/ask")
-def ask_question(query: str, top_k: int = 5):
-    """
-    Full RAG pipeline with caching, re-ranking and deduplication.
-    """
-    if document_store["index"] is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Index not ready. Please upload, chunk and index first."
-        )
 
-    # Check cache first
+
+@app.post("/ask")
+def ask_question(
+    request: Request,
+    response: Response,
+    query: str = Query(...),
+    top_k: int = Query(5),
+):
+    """Full RAG pipeline with caching, re-ranking and deduplication."""
+    document_store = _get_document_store(request, response)
+    query = _validated_query(query)
+    top_k = _validated_top_k(top_k)
+
+    if document_store["index"] is None:
+        raise HTTPException(status_code=400, detail="Index not ready. Please upload, chunk and index first.")
+
     key = _cache_key(query)
     if key in document_store["cache"]:
         cached = document_store["cache"][key]
+        document_store["last_answer"] = cached["result"]
         return {
-            "query"      : query,
-            "answer"     : cached["answer"],
-            "citations"  : cached["citations"],
+            "query": query,
+            "answer": cached["answer"],
+            "citations": cached["citations"],
             "chunks_used": cached["chunks_used"],
-            "cached"     : True
+            "cached": True,
         }
 
-    # Retrieve with optimized pipeline
     retrieved = retrieve(query, document_store["index"], top_k)
-
-    # Generate answer
     result = generate_answer(query, retrieved)
+    if result.get("error"):
+        raise HTTPException(status_code=502, detail=result["answer"])
 
-    # Store in cache and history
     cache_entry = {
-        "answer"    : result["answer"],
-        "citations" : result["citations"],
-        "chunks_used": len(retrieved)
+        "answer": result["answer"],
+        "citations": result["citations"],
+        "chunks_used": len(retrieved),
+        "result": result,
     }
-    document_store["cache"][key]  = cache_entry
+    document_store["cache"][key] = cache_entry
     document_store["last_answer"] = result
     document_store["history"].append({
-        "query"    : query,
-        "answer"   : result["answer"],
+        "query": query,
+        "answer": result["answer"],
         "citations": result["citations"],
-        "timestamp": __import__("datetime").datetime.now().isoformat()
+        "timestamp": datetime.utcnow().isoformat() + "Z",
     })
 
     return {
-        "query"      : query,
-        "answer"     : result["answer"],
-        "citations"  : result["citations"],
+        "query": query,
+        "answer": result["answer"],
+        "citations": result["citations"],
         "chunks_used": len(retrieved),
-        "cached"     : False
+        "cached": False,
     }
 
 
 @app.get("/history")
-def get_history():
+def get_history(request: Request, response: Response):
     """Returns the full conversation history for the session."""
+    document_store = _get_document_store(request, response)
     return {
         "total_questions": len(document_store["history"]),
-        "history"        : document_store["history"]
+        "history": document_store["history"],
     }
 
 
 @app.post("/reset")
-def reset_session():
-    document_store["filename"]    = None
-    document_store["pages"]       = []
-    document_store["chunks"]      = []
-    document_store["index"]       = None
-    document_store["last_answer"] = {}
-    document_store["history"]     = []
-    document_store["cache"]       = {}
+def reset_session(request: Request, response: Response):
+    document_store = _get_document_store(request, response)
+    _delete_session_file(document_store)
+    document_store.clear()
+    document_store.update(_new_document_store())
     return {"message": "Session reset successfully."}
-@app.get("/citations")
-def get_citations():
-    """
-    Returns the full cited passages from the last /ask call.
-    The frontend uses this to highlight source text.
-    """
-    if "last_answer" not in document_store:
-        raise HTTPException(
-            status_code=404,
-            detail="No answer generated yet. Call /ask first."
-        )
 
-    result = document_store["last_answer"]
+
+@app.get("/citations")
+def get_citations(request: Request, response: Response):
+    """Returns the full cited passages from the last /ask call."""
+    document_store = _get_document_store(request, response)
+    result = document_store.get("last_answer") or {}
+    citations = result.get("citations")
+    if citations is None:
+        raise HTTPException(status_code=404, detail="No answer generated yet. Call /ask first.")
 
     return {
-        "total_citations" : len(result["citations"]),
-        "citations"       : result["citations"]
+        "total_citations": len(citations),
+        "citations": citations,
     }
+
+
 @app.get("/stats")
-def get_stats():
-    """
-    Returns system performance statistics for the current session.
-    Useful for project evaluation and reporting.
-    """
+def get_stats(request: Request, response: Response):
+    """Returns system performance statistics for the current session."""
+    document_store = _get_document_store(request, response)
     chunks = document_store["chunks"]
     history = document_store["history"]
 
@@ -277,142 +442,56 @@ def get_stats():
 
     return {
         "document": {
-            "filename"       : document_store["filename"],
-            "total_pages"    : len(document_store["pages"]),
-            "total_chunks"   : len(chunks),
-            "avg_chunk_words": round(sum(word_counts)/len(word_counts), 1),
+            "filename": document_store["filename"],
+            "total_pages": len(document_store["pages"]),
+            "total_chunks": len(chunks),
+            "avg_chunk_words": round(sum(word_counts) / len(word_counts), 1),
             "min_chunk_words": min(word_counts),
             "max_chunk_words": max(word_counts),
         },
         "session": {
             "questions_asked": len(history),
-            "cache_hits"     : len(document_store["cache"]),
-            "cache_size"     : len(document_store["cache"]),
+            "cache_size": len(document_store["cache"]),
         },
         "system": {
             "retrieval_method": "Dense (FAISS) + Sparse (BM25) + RRF Fusion",
-            "chunking_method" : "Adaptive semantic boundary detection",
-            "llm_model"       : "GLM-4.5-Air via OpenRouter",
-            "embedding_model" : "all-MiniLM-L6-v2 (384 dims)"
-        }
+            "chunking_method": "Adaptive semantic boundary detection",
+            "llm_model": "GLM-4.5-Air via OpenRouter",
+            "embedding_model": "all-MiniLM-L6-v2 (384 dims)",
+        },
     }
+
+
 @app.get("/test/health")
-def health_check():
-    """
-    Full system health check.
-    Tests every component and reports status.
-    """
-    results = {}
-
-    # Check document loaded
-    results["document_loaded"] = {
-        "status" : "pass" if document_store["filename"] else "fail",
-        "detail" : document_store["filename"] or "No document uploaded"
+def health_check(request: Request, response: Response):
+    """Full system health check for the current session."""
+    document_store = _get_document_store(request, response)
+    results = {
+        "document_loaded": {
+            "status": "pass" if document_store["filename"] else "fail",
+            "detail": document_store["filename"] or "No document uploaded",
+        },
+        "chunking": {
+            "status": "pass" if document_store["chunks"] else "fail",
+            "detail": f"{len(document_store['chunks'])} chunks" if document_store["chunks"] else "Not chunked yet",
+        },
+        "index": {
+            "status": "pass" if document_store["index"] else "fail",
+            "detail": "FAISS + BM25 ready" if document_store["index"] else "Not indexed yet",
+        },
+        "cache": {
+            "status": "pass",
+            "detail": f"{len(document_store['cache'])} queries cached",
+        },
+        "history": {
+            "status": "pass",
+            "detail": f"{len(document_store['history'])} questions answered",
+        },
     }
 
-    # Check chunks exist
-    results["chunking"] = {
-        "status": "pass" if document_store["chunks"] else "fail",
-        "detail": f"{len(document_store['chunks'])} chunks" 
-                  if document_store["chunks"] else "Not chunked yet"
-    }
-
-    # Check index built
-    results["index"] = {
-        "status": "pass" if document_store["index"] else "fail",
-        "detail": "FAISS + BM25 ready" 
-                  if document_store["index"] else "Not indexed yet"
-    }
-
-    # Check cache
-    results["cache"] = {
-        "status": "pass",
-        "detail": f"{len(document_store['cache'])} queries cached"
-    }
-
-    # Check history
-    results["history"] = {
-        "status": "pass",
-        "detail": f"{len(document_store['history'])} questions answered"
-    }
-
-    # Overall status
-    all_pass = all(
-        v["status"] == "pass" 
-        for v in results.values()
-    )
+    all_pass = all(v["status"] == "pass" for v in results.values())
 
     return {
-        "overall" : "healthy" if all_pass else "degraded",
-        "checks"  : results
+        "overall": "healthy" if all_pass else "degraded",
+        "checks": results,
     }
-# ```
-
-# ---
-
-# ### 5.3 — Verify Your .env File
-
-# Open your `.env` file and make sure it looks exactly like this — no spaces around the `=` sign:
-# ```
-# GEMINI_API_KEY=AIzaSyXXXXXXXXXXXXXXXXXX
-# # ```
-
-# ---
-
-# ### 4.4 — Test the Full Pipeline
-
-# Restart the server if needed, then go to `http://127.0.0.1:8000/docs` and run these **in order**:
-
-# **1.** `POST /upload` — upload your PDF
-
-# **2.** `POST /chunk` — chunk it
-
-# **3.** `POST /index` — build the hybrid index (this may take 20–30 seconds the first time as it downloads the MiniLM embedding model ~80MB)
-
-# **4.** `POST /retrieve` — test a query. In the query box type something relevant to your PDF, for example:
-# ```
-# What is the main methodology used?
-# # ```
-
-# ---
-
-# ### 3.3 — Test It
-
-# Make sure uvicorn is still running (if not, run `uvicorn main:app --reload` again). Go to:
-# ```
-# http://127.0.0.1:8000/docs
-# # ```
-
-# **What this does:** FastAPI creates two endpoints — `/upload` accepts your PDF and immediately extracts text from it, and `/document/info` lets you check what's currently loaded. The `document_store` dictionary acts as your session memory for now.
-
-# ---
-
-# ### 2.3 — Run the Server
-
-# In your Command Prompt (with venv active, inside `doctor_rag`), run:
-# ```
-# uvicorn main:app --reload
-# ```
-
-# You should see output like:
-# ```
-# INFO:     Uvicorn running on http://127.0.0.1:8000
-# INFO:     Application startup complete.
-# ```
-
-# The `--reload` flag means the server automatically restarts whenever you save changes to your code — very handy during development.
-
-# ---
-
-# ### 2.4 — Test It
-
-# Open your browser and go to:
-# ```
-# http://127.0.0.1:8000
-# ```
-
-# You should see: `{"message": "DocTor RAG API is running"}`
-
-# Now test the upload using FastAPI's **built-in interactive docs** — go to:
-# ```
-# http://127.0.0.1:8000/docs

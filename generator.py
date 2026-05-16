@@ -6,12 +6,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+MODEL = os.getenv("OPENROUTER_MODEL", "z-ai/glm-4.5-air:free")
+
 client = OpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
+    api_key=OPENROUTER_API_KEY,
     base_url="https://openrouter.ai/api/v1"
 )
-
-MODEL = "z-ai/glm-4.5-air:free"
 
 
 def _build_prompt(query: str, chunks: list[dict]) -> str:
@@ -37,8 +38,8 @@ STRICT RULES:
 4. At the end of your answer, add a "Sources:" section listing each
    cited passage like this:
    Sources:
-   [1] Passage 1 — Page 3
-   [2] Passage 2 — Page 5
+   [1] Passage 1 - Page 3
+   [2] Passage 2 - Page 5
 5. If the passages do not contain enough information to answer, say:
    "I could not find sufficient information in the document to answer
    this question."
@@ -97,11 +98,20 @@ def _highlight_passages(
 
 
 def generate_answer(query: str, chunks: list[dict]) -> dict:
+    if not OPENROUTER_API_KEY:
+        return {
+            "answer"   : "OPENROUTER_API_KEY is not configured.",
+            "citations": [],
+            "sources"  : [],
+            "error"    : True
+        }
+
     if not chunks:
         return {
             "answer"   : "No relevant chunks were retrieved. Please try a different question.",
             "citations": [],
-            "sources"  : []
+            "sources"  : [],
+            "error"    : False
         }
 
     prompt = _build_prompt(query, chunks)
@@ -109,7 +119,8 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
     try:
         response = client.chat.completions.create(
             model=MODEL,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            timeout=60
         )
 
         answer_text = response.choices[0].message.content
@@ -130,12 +141,14 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
         return {
             "answer"   : answer_text,
             "citations": citations,
-            "sources"  : sources
+            "sources"  : sources,
+            "error"    : False
         }
 
     except Exception as e:
         return {
             "answer"   : f"Error generating answer: {str(e)}",
             "citations": [],
-            "sources"  : []
+            "sources"  : [],
+            "error"    : True
         }

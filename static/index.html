@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DocTor — RAG System</title>
+    <title>DocTor - RAG System</title>
     <style>
       * {
         box-sizing: border-box;
@@ -509,9 +509,9 @@
     <header>
       <div class="header-left">
         <h1>DocTor</h1>
-        <span>Adaptive RAG • Hybrid Retrieval • Evidence-Aligned Answers</span>
+        <span>Adaptive RAG | Hybrid Retrieval | Evidence-Aligned Answers</span>
       </div>
-      <button class="reset-btn" id="resetBtn">↺ New Session</button>
+      <button class="reset-btn" id="resetBtn">Reset Session</button>
     </header>
 
     <div class="main">
@@ -520,13 +520,13 @@
         <div class="panel-title">Document</div>
 
         <div class="upload-area" id="uploadArea">
-          <div class="upload-icon">📄</div>
+          <div class="upload-icon">PDF</div>
           <p id="uploadText">Click or drag & drop a PDF</p>
           <input type="file" id="fileInput" accept=".pdf" />
         </div>
 
         <button class="btn btn-primary" id="processBtn" disabled>
-          ⚡ Process Document
+          Process Document
         </button>
 
         <div class="panel-title">Pipeline Status</div>
@@ -549,7 +549,7 @@
         </div>
 
         <div class="doc-info" id="docInfo">
-          <div class="doc-name" id="docName">—</div>
+          <div class="doc-name" id="docName">-</div>
           <div class="doc-badges" id="docBadges"></div>
         </div>
 
@@ -578,13 +578,13 @@
           <div class="input-wrapper">
             <textarea
               id="queryInput"
-              placeholder="Ask a question about your document… (Enter to send)"
+              placeholder="Ask a question about your document... (Enter to send)"
               rows="1"
               disabled
             ></textarea>
             <span class="char-count" id="charCount">0</span>
           </div>
-          <button class="send-btn" id="sendBtn" disabled>➤</button>
+          <button class="send-btn" id="sendBtn" disabled>&gt;</button>
         </div>
       </div>
     </div>
@@ -593,6 +593,20 @@
 
     <script>
       const API = window.location.origin;
+      const SESSION_KEY = "doctor_session_id";
+      const SESSION_ID =
+        localStorage.getItem(SESSION_KEY) || crypto.randomUUID();
+      localStorage.setItem(SESSION_KEY, SESSION_ID);
+
+      function apiOptions(options = {}) {
+        return {
+          ...options,
+          headers: {
+            ...(options.headers || {}),
+            "X-Session-Id": SESSION_ID,
+          },
+        };
+      }
 
       const uploadArea = document.getElementById("uploadArea");
       const fileInput = document.getElementById("fileInput");
@@ -610,7 +624,7 @@
       let docReady = false;
       let questionCount = 0;
 
-      // ── File selection ──────────────────────────────────────────────
+      // File selection
       uploadArea.addEventListener("click", () => fileInput.click());
       fileInput.addEventListener("change", (e) => {
         if (e.target.files[0]) selectFile(e.target.files[0]);
@@ -634,11 +648,11 @@
           return;
         }
         selectedFile = file;
-        document.getElementById("uploadText").textContent = `📎 ${file.name}`;
+        document.getElementById("uploadText").textContent = `Selected: ${file.name}`;
         processBtn.disabled = false;
       }
 
-      // ── Process pipeline ────────────────────────────────────────────
+      // Process pipeline
       processBtn.addEventListener("click", async () => {
         if (!selectedFile) return;
         processBtn.disabled = true;
@@ -649,24 +663,24 @@
           setStep("upload", "loading");
           const fd = new FormData();
           fd.append("file", selectedFile);
-          const upRes = await fetch(`${API}/upload`, {
+          const upRes = await fetch(`${API}/upload`, apiOptions({
             method: "POST",
             body: fd,
-          });
+          }));
           if (!upRes.ok) throw new Error("Upload");
           const upData = await upRes.json();
           setStep("upload", "done", `${upData.total_pages} pages`);
 
           // 2. Chunk
           setStep("chunk", "loading");
-          const chRes = await fetch(`${API}/chunk`, { method: "POST" });
+          const chRes = await fetch(`${API}/chunk`, apiOptions({ method: "POST" }));
           if (!chRes.ok) throw new Error("Chunk");
           const chData = await chRes.json();
           setStep("chunk", "done", `${chData.total_chunks} chunks`);
 
           // 3. Index
           setStep("index", "loading");
-          const ixRes = await fetch(`${API}/index`, { method: "POST" });
+          const ixRes = await fetch(`${API}/index`, apiOptions({ method: "POST" }));
           if (!ixRes.ok) throw new Error("Index");
           setStep("index", "done", "FAISS+BM25");
 
@@ -683,10 +697,10 @@
           sendBtn.disabled = false;
           queryInput.focus();
 
-          welcome.innerHTML = `<h2>Ready ✓</h2>
-         <p>Ask anything about <strong>${upData.filename}</strong><br/>
+          welcome.innerHTML = `<h2>Ready</h2>
+         <p>Ask anything about <strong>${escapeHtml(upData.filename)}</strong><br/>
          <span style="font-size:11px;color:#475569">
-           ${upData.total_pages} pages • ${chData.total_chunks} chunks indexed
+           ${upData.total_pages} pages | ${chData.total_chunks} chunks indexed
          </span></p>`;
 
           showToast("Document processed successfully!", "success");
@@ -703,7 +717,7 @@
         }
       });
 
-      // ── Step helpers ────────────────────────────────────────────────
+      // Step helpers
       function setStep(name, state, detail = "") {
         const el = document.getElementById(`step-${name}`);
         const icon = el.querySelector(".step-icon");
@@ -711,11 +725,11 @@
         el.className = `step ${state}`;
         icon.textContent =
           state === "done"
-            ? "✓"
+            ? "OK"
             : state === "loading"
-              ? "…"
+              ? "..."
               : state === "error"
-                ? "✗"
+                ? "!"
                 : icon.textContent;
         if (det) det.textContent = detail;
       }
@@ -730,11 +744,11 @@
         });
       }
 
-      // ── Reset session ───────────────────────────────────────────────
+      // Reset session
       resetBtn.addEventListener("click", async () => {
         if (!confirm("Start a new session? Current document will be cleared."))
           return;
-        await fetch(`${API}/reset`, { method: "POST" });
+        await fetch(`${API}/reset`, apiOptions({ method: "POST" }));
         selectedFile = null;
         docReady = false;
         questionCount = 0;
@@ -756,7 +770,7 @@
         showToast("Session reset.", "success");
       });
 
-      // ── Send message ────────────────────────────────────────────────
+      // Send message
       sendBtn.addEventListener("click", sendMessage);
       queryInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
@@ -790,7 +804,7 @@
         try {
           const res = await fetch(
             `${API}/ask?query=${encodeURIComponent(query)}&top_k=5`,
-            { method: "POST" },
+            apiOptions({ method: "POST" }),
           );
           if (!res.ok) throw new Error(`Server error ${res.status}`);
           const data = await res.json();
@@ -812,7 +826,7 @@
         queryInput.focus();
       }
 
-      // ── Message builders ─────────────────────────────────────────────
+      // Message builders
       function appendUserMessage(text) {
         const div = document.createElement("div");
         div.className = "message user";
@@ -831,14 +845,14 @@
         if (citations && citations.length > 0) {
           citHtml = `
         <div class="citations-panel">
-          <div class="citation-label">📌 ${citations.length} Source${citations.length > 1 ? "s" : ""} Used</div>
+          <div class="citation-label">${citations.length} Source${citations.length > 1 ? "s" : ""} Used</div>
           ${citations
             .map(
               (c) => `
             <div class="citation-card" onclick="this.classList.toggle('expanded')">
               <div class="cite-header">
-                <span>[${c.citation_number}] ${escapeHtml(c.full_text.substring(0, 40))}…</span>
-                <span class="cite-page">Page ${c.page}</span>
+                <span>[${c.citation_number}] ${escapeHtml(c.full_text.substring(0, 40))}...</span>
+                <span class="cite-page">Page ${escapeHtml(c.page)}</span>
               </div>
               <div class="cite-text">${escapeHtml(c.preview)}</div>
               <div class="cite-expanded">${escapeHtml(c.full_text)}</div>
@@ -848,12 +862,12 @@
         </div>`;
         } else {
           citHtml = `<div class="no-citation-note">
-        ℹ️ No inline citations detected in this response.
+        No inline citations detected in this response.
       </div>`;
         }
 
         const meta =
-          chunksUsed > 0 ? `DocTor • ${chunksUsed} chunks retrieved` : "DocTor";
+          chunksUsed > 0 ? `DocTor | ${chunksUsed} chunks retrieved` : "DocTor";
 
         div.innerHTML = `
       <div class="msg-meta">${meta}</div>
@@ -869,7 +883,7 @@
         div.className = "message bot";
         div.id = id;
         div.innerHTML = `
-      <div class="msg-meta">DocTor is thinking…</div>
+      <div class="msg-meta">DocTor is thinking...</div>
       <div class="thinking">
         <div class="dot"></div><div class="dot"></div><div class="dot"></div>
       </div>`;
@@ -883,7 +897,7 @@
         if (el) el.remove();
       }
 
-      // ── Utilities ────────────────────────────────────────────────────
+      // Utilities
       function scrollChat() {
         chatMessages.scrollTop = chatMessages.scrollHeight;
       }

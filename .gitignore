@@ -15,6 +15,7 @@ __pycache__/
 
 # FAISS index files
 *.index
+model_cache/
 
 # OS files
 .DS_Store
